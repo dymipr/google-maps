@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Route Optimizer</title>
+    <style>
+        #map {
+            height: 400px;
+            width: 100%;
+        }
+        .error {
+            color: red;
+        }
+        .highlight-green {
+            background-color: lightgreen;
+        }
+        .highlight-orange {
+            background-color: orange;
+        }
+        #spinner {
+            display: none;
+            margin-top: 10px;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Route Optimizer</h1>
+
+    <label for="pickup">Pickup Location:</label>
+    <input type="text" id="pickup" placeholder="Enter pickup location"><br><br>
+    <label for="destinations">Destinations (one per line):</label><br>
+    <textarea id="destinations" rows="10" cols="50" placeholder="Enter each destination on a new line"></textarea><br><br>
+    <button onclick="calculateRoute()">Calculate Route</button>
+    <div id="spinner">Calculating route, please wait...</div>
+    <div>
+        <input type="checkbox" id="weather-toggle" checked onclick="toggleWeatherLayer()"> Show Precipitation Overlay
+    </div>
+
+    <div id="results" class="hidden">
+        <h2>Results</h2>
+        <p>Total Miles: <span id="total-distance" class="highlight-green"></span></p>
+        <p>Total Transit: <span id="total-time"></span></p>
+        <p>1 Pick 1 Drop Mileage to Final Destination Only: <span id="direct-distance" class="highlight-orange"></span></p>
+
+        <h2>Optimized Route</h2>
+        <ul id="route-segments"></ul>
+        <div id="final-destination-section"></div>
+        <p>Route Map URL: <a id="route-url" href="#" target="_blank"></a></p>
+        <div id="map"></div>
+        <div id="error" class="error"></div>
+    </div>
+
+    <script>
+        let map;
+        let directionsService;
+        let directionsRenderer;
+        let precipitationLayer;
+
+        function initMap() {
+            map = new google.maps.Map(document.getElementById('map'), {
+                zoom: 7,
+                center: { lat: 37.77, lng: -122.42 }
+            });
+
+            directionsService = new google.maps.DirectionsService();
+            directionsRenderer = new google.maps.DirectionsRenderer();
+            directionsRenderer.setMap(map);
+
+            // Initialize the precipitation layer
+            precipitationLayer = new google.maps.ImageMapType({
+                getTileUrl: function(coord, zoom) {
+                    return `https://tile.openweathermap.org/map/precipitation_new/${zoom}/${coord.x}/${coord.y}.png?appid=7371d4d33e38f8bb3c65f295bd60a38d`;
+                },
+                tileSize: new google.maps.Size(256, 256),
+                name: "Precipitation"
+            });
+            map.overlayMapTypes.insertAt(0, precipitationLayer);
+        }
+
+        function toggleWeatherLayer() {
+            if (document.getElementById('weather-toggle').checked) {
+                map.overlayMapTypes.insertAt(0, precipitationLayer);
+            } else {
+                map.overlayMapTypes.removeAt(0);
+            }
+        }
+
+        function formatLocation(location) {
+            const parts = location.split(',').map(part => part.trim());
+            if (parts.length === 3) {
+                const [city, state] = parts;
+                return `${capitalizeWords(city)}, ${state.toUpperCase()}`;
+            } else if (parts.length === 2) {
+                const [city, state] = parts;
+                return `${capitalizeWords(city)}, ${state.toUpperCase()}`;
+            }
+            return capitalizeWords(location);
+        }
+
+        function capitalizeWords(str) {
+            return str.replace(/\b\w/g, char => char.toUpperCase());
+        }
+
+        function formatDistance(distanceInMeters) {
+            return (distanceInMeters / 1609.34).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' mi';
+        }
+
+        function formatTravelTime(durationInSeconds) {
+            const hours = Math.floor(durationInSeconds / 3600);
+            const minutes = Math.round((durationInSeconds % 3600) / 60);
+            return `${hours}h ${minutes}m`;
+        }
+
+        function showSpinner() {
+            document.getElementById('spinner').style.display = 'block';
+            document.getElementById('results').classList.add('hidden');
+        }
+
+        function hideSpinner() {
+            document.getElementById('spinner').style.display = 'none';
+            document.getElementById('results').classList.remove('hidden');
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('results').classList.add('hidden');
+        });
+
+        async function calculateRoute() {
+            showSpinner();
+
+            const pickup = document.getElementById('pickup').value;
+            const destinations = document.getElementById('destinations').value.split('\n').filter(dest => dest.trim() !== '');
+            const errorDiv = document.getElementById('error');
+            const routeSegmentsList = document.getElementById('route-segments');
+
+            if (!pickup || destinations.length === 0) {
+                errorDiv.textContent = 'Please enter both pickup location and at least one destination.';
+                hideSpinner();
+                return;
+            }
+
+            errorDiv.textContent = ''; // Clear previous errors
+            routeSegmentsList.innerHTML = ''; // Clear previous results
+
+            const waypoints = destinations.map(destination => ({ location: destination, stopover: true }));
+            let bestRoute = null;
+            let bestTime = Infinity;
+            let bestOrder = [];
+            let finalDestination = "";
+
+            for (let i = 0; i < destinations.length; i++) {
+                const destination = destinations[i];
+                const otherWaypoints = waypoints.slice(0, i).concat(waypoints.slice(i + 1));
+
+                const request = {
+                    origin: pickup,
+                    destination: destination,
+                    waypoints: otherWaypoints,
+                    travelMode: 'DRIVING',
+                    optimizeWaypoints: true
+                };
+
+                try {
+                    const result = await new Promise((resolve, reject) => {
+                        directionsService.route(request, function(result, status) {
+                            if (status === 'OK') {
+                                resolve(result);
+                            } else {
+                                reject(status);
+                            }
+                        });
+                    });
+
+                    const route = result.routes[0];
+                    let totalTime = 0;
+                    route.legs.forEach(leg => {
+                        totalTime += leg.duration.value;
+                    });
+
+                    if (totalTime < bestTime) {
+                        bestTime = totalTime;
+                        bestRoute = result;
+                        bestOrder = result.routes[0].waypoint_order.slice();
+                        finalDestination = destination;
+                    }
+                } catch (error) {
+                    console.error('Error calculating route:', error);
+                    errorDiv.textContent = `Error calculating route: ${error}`;
+                    hideSpinner();
+                    return;
+                }
+            }
+
+            if (bestRoute) {
+                directionsRenderer.setDirections(bestRoute);
+
+                const route = bestRoute.routes[0];
+                let totalDistance = 0;
+                let totalTime = 0;
+
+                route.legs.forEach(leg => {
+                    totalDistance += leg.distance.value;
+                    totalTime += leg.duration.value;
+                });
+
+                try {
+                    const directRequest = {
+                        origin: pickup,
+                        destination: finalDestination,
+                        travelMode: 'DRIVING'
+                    };
+
+                    const directResult = await new Promise((resolve, reject) => {
+                        directionsService.route(directRequest, function(result, status) {
+                            if (status === 'OK') {
+                                resolve(result);
+                            } else {
+                                reject(status);
+                            }
+                        });
+                    });
+
+                    if (directResult) {
+                        const directLeg = directResult.routes[0].legs[0];
+                        document.getElementById('direct-distance').textContent = formatDistance(directLeg.distance.value);
+                    } else {
+                        errorDiv.textContent = 'Error calculating direct route.';
+                    }
+                } catch (error) {
+                    console.error('Error calculating direct route:', error);
+                    errorDiv.textContent = `Error calculating direct route: ${error}`;
+                    hideSpinner();
+                    return;
+                }
+
+                document.getElementById('total-distance').textContent = formatDistance(totalDistance);
+                document.getElementById('total-time').textContent = formatTravelTime(totalTime);
+
+                const waypoints = [];
+                route.legs.forEach((leg, index) => {
+                    const startLocation = formatLocation(leg.start_address);
+                    const endLocation = formatLocation(leg.end_address);
+                    const distance = formatDistance(leg.distance.value);
+                    const duration = formatTravelTime(leg.duration.value);
+
+                    const legText = index === 0 
+                        ? `Pickup: ${startLocation} - ${distance} - ${duration} to next stop`
+                        : `Delivery ${index}: ${startLocation} - ${distance} - ${duration} to next stop`;
+                    if (index > 0) {
+                        waypoints.push(encodeURIComponent(startLocation));
+                    }
+
+                    const li = document.createElement('li');
+                    li.textContent = legText;
+                    routeSegmentsList.appendChild(li);
+                });
+
+                const finalDestinationSection = document.getElementById('final-destination-section');
+                const lastLeg = route.legs[route.legs.length - 1];
+                const finalDestinationText = `Delivery ${route.legs.length}: ${formatLocation(lastLeg.end_address)}`;
+                finalDestinationSection.innerHTML = `
+                    <ul><li>${finalDestinationText}</li></ul>
+                `;
+
+                // Adjust the map to fit the route
+                const bounds = new google.maps.LatLngBounds();
+                route.legs.forEach((leg) => {
+                    bounds.extend(leg.start_location);
+                    bounds.extend(leg.end_location);
+                });
+                map.fitBounds(bounds);
+
+                const waypointsString = waypoints.join('|');
+                const routeUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(pickup)}&destination=${encodeURIComponent(finalDestination)}&waypoints=${waypointsString}`;
+                const routeLink = document.getElementById('route-url');
+                routeLink.href = routeUrl;
+                routeLink.textContent = routeUrl;
+
+            } else {
+                errorDiv.textContent = 'Error finding the best route.';
+            }
+
+            hideSpinner();
+        }
+    </script>
+    <script async defer src="https://maps.googleapis.com/maps/api/js?key=AIzaSyA3r0p1kyloJSECy3wk1tUQS8cAyTomxfY&callback=initMap"></script>
+</body>
+</html>
